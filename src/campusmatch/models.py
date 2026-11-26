@@ -49,6 +49,20 @@ class Answer:
     acceptable: frozenset[int]
     importance: Importance = Importance.SOMEWHAT
 
+    @property
+    def acceptable_mask(self) -> int:
+        """`acceptable` as a bitmask (bit i set = option i acceptable).
+
+        "Is B's choice acceptable to A?" becomes `mask >> choice & 1`, which is what lets
+        the SQLite store keep it in one INTEGER column and the NumPy path test it in bulk.
+        """
+        return sum(1 << i for i in self.acceptable)
+
+    @staticmethod
+    def options_from_mask(mask: int) -> frozenset[int]:
+        """Inverse of `acceptable_mask`."""
+        return frozenset(i for i in range(mask.bit_length()) if mask >> i & 1)
+
     def validate(self, question: Question) -> None:
         n = len(question.options)
         if not 0 <= self.choice < n:

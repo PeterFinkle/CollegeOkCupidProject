@@ -1,10 +1,10 @@
-"""HTTP API (FastAPI) with an in-memory store, plus a single-page web UI at `/`."""
+"""HTTP API (FastAPI) over a pluggable profile store, plus a single-page web UI at `/`."""
 
 from __future__ import annotations
 
 import uuid
 from importlib.resources import files
-from threading import Lock
+from os import PathLike
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -14,6 +14,7 @@ from .data import QUESTIONS, QUESTIONS_BY_ID, generate_students
 from .matching import pair_roommates, top_matches
 from .models import Answer, Importance, Profile
 from .scoring import explain, score
+from .storage import ProfileStore, SQLiteStore, Store  # Store is re-exported: it lived here
 
 IMPORTANCE_NAMES = {i.name.lower(): i for i in Importance}
 
@@ -37,28 +38,6 @@ class ProfileIn(BaseModel):
     major: str = Field(default="", max_length=80)
     year: int = Field(default=1, ge=1, le=6)
     answers: list[AnswerIn] = Field(default_factory=list)
-
-
-class Store:
-    """Thread-safe in-memory repository. Swap for a database in production."""
-
-    def __init__(self) -> None:
-        self._profiles: dict[str, Profile] = {}
-        self._lock = Lock()
-
-    def add(self, p: Profile) -> None:
-        with self._lock:
-            self._profiles[p.id] = p
-
-    def get(self, pid: str) -> Profile | None:
-        return self._profiles.get(pid)
-
-    def all(self) -> list[Profile]:
-        with self._lock:
-            return list(self._profiles.values())
-
-    def __len__(self) -> int:
-        return len(self._profiles)
 
 
 def _to_profile(body: ProfileIn, pid: str) -> Profile:
@@ -88,15 +67,29 @@ def _profile_out(p: Profile) -> dict:
     }
 
 
-def create_app(seed_students: int = 60, seed: int = 7) -> FastAPI:
+def create_app(
+    seed_students: int = 60,
+    seed: int = 7,
+    store: ProfileStore | None = None,
+    db_path: str | PathLike[str] | None = None,
+) -> FastAPI:
+    """Build the app on `store`, or on a SQLite file at `db_path`, or in memory by default.
+
+    Synthetic students are seeded only into an empty store, so restarting on an existing
+    database keeps real profiles and doesn't pile up a fresh batch of fake ones each time.
+    """
+    if store is not None and db_path is not None:
+        raise ValueError("pass either store or db_path, not both")
+    if store is None:
+        store = SQLiteStore(db_path) if db_path is not None else Store()
+    if len(store) == 0:
+        store.add_many(generate_students(seed_students, seed=seed))
+
     app = FastAPI(
         title="CampusMatch",
         version="0.1.0",
         description="Compatibility matching and stable roommate pairing for college students.",
     )
-    store = Store()
-    for s in generate_students(seed_students, seed=seed):
-        store.add(s)
     app.state.store = store
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -174,15 +167,15 @@ def create_app(seed_students: int = 60, seed: int = 7) -> FastAPI:
             raise HTTPException(422, "student ids must be unique")
         if len(ids) > 400:
             raise HTTPException(422, "at most 400 students per request")
-        students = [_require(i) for i in ids]
-        pairing = pair_roommates(students)
+        by_id = {i: _require(i) for i in ids}
+        pairing = pair_roommates(list(by_id.values()))
         pairs, seen, unpaired = [], set(), []
         for a, b in pairing.pairs.items():
             if b is None:
                 unpaired.append(a)
             elif a not in seen:
                 seen.update((a, b))
-                pairs.append({"a": a, "b": b, "match": score(store.get(a), store.get(b)).percent})
+                pairs.append({"a": a, "b": b, "match": score(by_id[a], by_id[b]).percent})
         return {"method": pairing.method, "pairs": pairs, "unpaired": unpaired}
 
     return app

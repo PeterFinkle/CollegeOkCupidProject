@@ -2,8 +2,9 @@
 
 campusmatch demo   [--students N] [--seed S]   show sample recommendations
 campusmatch pair   [--students N] [--seed S]   stable roommate pairing
-campusmatch bench  [--students N]              time scoring + pairing
-campusmatch serve  [--host H] [--port P]       run the web app
+campusmatch bench  [--students N]              time scoring (pure Python and NumPy) + pairing
+campusmatch serve  [--host H] [--port P] [--db PATH]
+                                               run the web app (in memory, or on a SQLite file)
 """
 
 from __future__ import annotations
@@ -51,24 +52,46 @@ def _pair(args: argparse.Namespace) -> None:
 
 def _bench(args: argparse.Namespace) -> None:
     students = generate_students(args.students, seed=1)
+    n = len(students)
     t0 = time.perf_counter()
     for s in students:
         top_matches(s, students, k=10)
-    t1 = time.perf_counter()
-    pairing = pair_roommates(students)
-    t2 = time.perf_counter()
-    n = len(students)
+    pure = time.perf_counter() - t0
     print(
-        f"{n} students: all-pairs recommendations {t1 - t0:.2f}s "
-        f"({n * (n - 1) / (t1 - t0):,.0f} pair scores/s)"
+        f"{n} students: all-pairs recommendations {pure:.3f}s "
+        f"({n * (n - 1) / pure:,.0f} pair scores/s, pure Python)"
     )
-    print(f"roommate pairing ({pairing.method}) in {t2 - t1:.2f}s")
+
+    try:
+        from .fast import encode, top_matches_fast
+    except ImportError:
+        print("numpy not installed; skipping the vectorized path (pip install campusmatch[fast])")
+    else:
+        # Same work as above: score every pair, then take each student's top 10.
+        t0 = time.perf_counter()
+        arrays = encode(students)
+        matrix, shared = arrays.match(), arrays.shared()
+        for i in range(n):
+            top_matches_fast(i, matrix, k=10, shared=shared)
+        vec = time.perf_counter() - t0
+        print(
+            f"{n} students: all-pairs recommendations {vec:.3f}s "
+            f"({n * (n - 1) / vec:,.0f} pair scores/s, NumPy) - {pure / vec:.0f}x faster"
+        )
+
+    t0 = time.perf_counter()
+    pairing = pair_roommates(students)
+    print(f"roommate pairing ({pairing.method}) in {time.perf_counter() - t0:.2f}s")
 
 
 def _serve(args: argparse.Namespace) -> None:
     import uvicorn
 
-    uvicorn.run("campusmatch.api:app", host=args.host, port=args.port, reload=False)
+    from .api import create_app
+
+    if args.db:
+        print(f"Storing profiles in SQLite at {args.db}")
+    uvicorn.run(create_app(db_path=args.db), host=args.host, port=args.port, reload=False)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -86,6 +109,9 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("serve")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
+    p.add_argument(
+        "--db", metavar="PATH", help="SQLite file to keep profiles in (default: in memory)"
+    )
     p.set_defaults(fn=_serve)
     args = parser.parse_args(argv)
     args.fn(args)

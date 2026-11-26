@@ -13,9 +13,11 @@ then does two things:
    with each other than with their assigned partners. When no such pairing exists, it falls back
    to a greedy pairing that is provably stable on the mutual match score.
 
-It's a Python library, a REST API (FastAPI), a CLI, and a small web UI with no dependencies. It
-has 35 tests, including a brute-force check of the pairing algorithm against every possible
-pairing on random inputs.
+It's a Python library, a REST API (FastAPI) that stores profiles in memory or in SQLite, a CLI,
+and a small web UI with no dependencies. An optional NumPy path scores a whole population 30–40x
+faster than the pure-Python scorer and gives the same numbers. It has 65 tests, including a
+brute-force check of the pairing algorithm against every possible pairing on random inputs, and
+a check that the NumPy path matches the scalar scorer on every pair.
 
 <img src="docs/img/matches.png" alt="Ranked matches with a per-question breakdown" width="640">
 
@@ -24,13 +26,26 @@ pairing on random inputs.
 ```bash
 pip install -e ".[dev]"
 campusmatch serve            # web UI at http://127.0.0.1:8000, API docs at /docs
+campusmatch serve --db campus.db   # same, but profiles persist in a SQLite file
 campusmatch demo             # top matches for a few synthetic students
 campusmatch pair --students 20
 campusmatch bench --students 500
 pytest -q
 ```
 
-Or with Docker: `docker build -t campusmatch . && docker run -p 8000:8000 campusmatch`.
+Or with Docker. The second form keeps profiles in a volume across container restarts:
+
+```bash
+docker build -t campusmatch .
+docker run -p 8000:8000 campusmatch
+docker run -p 8000:8000 -v campusmatch:/data campusmatch \
+  campusmatch serve --host 0.0.0.0 --db /data/campus.db
+```
+
+`pip install -e ".[fast]"` adds only NumPy, for the vectorized scorer (the `dev` extra includes it).
+
+On first start the store is seeded with 60 synthetic students. Seeding happens only when the store
+is empty, so restarting on an existing database keeps everyone who signed up.
 
 ## How scoring works
 
@@ -94,19 +109,51 @@ stable pairing exists. It also covers the classic unsolvable 4-person instance a
 
 Interactive docs are at `/docs` (OpenAPI).
 
+## Storage
+
+`storage.py` has two stores behind one small `ProfileStore` interface (`add`, `add_many`, `get`,
+`all`, `len()`): the in-memory `Store` used by default and in tests, and `SQLiteStore`, which uses only
+the standard library `sqlite3`.
+
+- Two tables: `profiles`, and `answers` keyed by (profile, question). The set of acceptable
+  options is stored as an integer bitmask, so "is B's answer acceptable to A?" is a single bit
+  test, in SQL or in NumPy.
+- FastAPI runs sync endpoints in a thread pool. The store shares one connection across threads
+  (`check_same_thread=False`) and serializes access with a lock. It uses WAL journaling, so a
+  commit is an append rather than a journal rewrite.
+- Saving a profile is an upsert that replaces its answers in one transaction, which matches what
+  the in-memory dict does.
+
 ## Performance
 
-`campusmatch bench --students 500` on a laptop-class CPU:
+Measured with `campusmatch bench` on a 4-vCPU cloud VM (Xeon @ 2.1 GHz), Python 3.13, NumPy 2.5,
+over three runs:
 
-- All-pairs recommendations: about 250k pair scores per second, about 1 s for 500 students.
-- Roommate pairing: about 2.5 s for 500 students. Building the preference lists is O(n² log n).
-  Irving runs in O(n²) list operations in principle; this implementation uses `list.remove`,
-  which adds a factor of n.
+| Students | Pure Python (`top_matches` per student) | NumPy (`fast.py`) | Speedup |
+|---:|---:|---:|---:|
+| 500 | 1.0–1.2 s (≈230k pair scores/s) | 0.03 s (≈7.5M pair scores/s) | 30–36x |
+| 2000 | 17.5–18.5 s (≈220k pair scores/s) | 0.46–0.52 s (≈8.5M pair scores/s) | 34–40x |
 
-At scale I'd change three things. I'd precompute per-question bitmasks so the score becomes a few
-vectorized operations (NumPy, or SQL over an answers table). I'd cache the score matrix and
-invalidate it per profile on update. And I'd narrow candidates first (same school year, housing
-area) before scoring.
+Both columns do the same work: score every ordered pair, then take each student's top 10.
+
+- **Why the NumPy path is fast.** `fast.encode` packs the population into per-question arrays
+  (choice, acceptable bitmask, importance weight, answered mask). Then each n×n quantity is one
+  matrix product. Shared-question counts are `answered @ answered.T`. Possible weight is
+  `weight @ answered.T`. Earned weight multiplies each student's weighted, unpacked bitmask by
+  everyone's one-hot choices. The weights are small integers, so the float64 sums are exact and
+  the matrix equals `scoring.score` bit for bit. The tests check this on every pair, including
+  pairs with no shared questions and judges who marked everything irrelevant.
+- **Where the time goes at 2000 students.** Encoding takes 0.01 s. The matrix products take
+  0.12 s, which is about 32M pair scores/s. The rest is top-k selection: one stable sort per
+  row, which keeps tie-breaking identical to `top_matches`. Memory is O(n²), a few 32 MB
+  matrices at n = 2000.
+- **Roommate pairing** still uses pure Python: 2.4 s for 500 students, 62 s for 2000. Building
+  the preference lists is O(n² log n) score calls. Irving runs in O(n²) list operations in
+  principle; this implementation uses `list.remove`, which adds a factor of n.
+
+What I'd change next at scale: build the preference lists for pairing from the NumPy matrices,
+cache the score matrix and invalidate it one row and column per profile on update, and narrow
+candidates first (same school year, housing area) before scoring.
 
 ## Project layout
 
@@ -115,16 +162,19 @@ src/campusmatch/
   models.py     Question, Answer, Profile, Importance
   scoring.py    satisfaction, match score, explanation
   matching.py   top-k, Irving's algorithm, greedy fallback, stability check
+  fast.py       optional NumPy path: n×n match matrix, top-k from a matrix row
   data.py       question bank + seeded synthetic population (persona-based)
-  api.py        FastAPI app, in-memory thread-safe store
-  cli.py        demo / pair / bench / serve
+  storage.py    ProfileStore interface, thread-safe in-memory and SQLite stores
+  api.py        FastAPI app over any ProfileStore
+  cli.py        demo / pair / bench / serve [--db]
   static/       single-page UI (vanilla JS, light + dark mode)
-tests/          scoring, matching (incl. brute-force), API
+tests/          scoring, matching (incl. brute-force), NumPy vs scalar, storage, API
 ```
 
 ## Next steps
 
-- Persist profiles in Postgres (the `Store` class is the only seam that needs replacing).
+- Postgres instead of SQLite once the API runs on more than one machine (a third
+  `ProfileStore`).
 - Authentication, so each student can only edit their own profile.
 - Learn importance weights from which matches students actually message or accept.
 - Group housing (suites of 3–4), which is NP-hard in general and would need a heuristic or an ILP.
