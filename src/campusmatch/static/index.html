@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CampusMatch</title>
+<style>
+  :root {
+    --bg: #f7f6f3; --surface: #ffffff; --text: #1d1d1f; --muted: #6b6b70;
+    --border: #e2e0db; --accent: #3b5bdb; --accent-soft: #e7ecff; --good: #2b8a3e; --bad: #c92a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141416; --surface: #1e1e21; --text: #ececef; --muted: #9a9aa2;
+      --border: #313136; --accent: #7d95ff; --accent-soft: #242a45; --good: #69db7c; --bad: #ff8787;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 28px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 { font-size: 18px; margin: 32px 0 12px; }
+  p.lede { color: var(--muted); margin: 0 0 24px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+          padding: 16px; margin-bottom: 12px; }
+  label { display: block; font-size: 14px; color: var(--muted); margin-bottom: 4px; }
+  input, select { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+                  background: var(--bg); color: var(--text); font: inherit; }
+  .row { display: grid; grid-template-columns: 2fr 2fr 1fr; gap: 12px; }
+  .q-text { font-weight: 600; margin-bottom: 10px; }
+  .opts { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 12px; align-items: center;
+          font-size: 15px; }
+  .opts .hdr { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .imp { margin-top: 10px; display: flex; gap: 8px; align-items: center; font-size: 14px; }
+  .imp select { width: auto; }
+  button { background: var(--accent); color: white; border: 0; border-radius: 8px; padding: 10px 18px;
+           font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .match { display: flex; gap: 16px; align-items: center; }
+  .pct { font-size: 26px; font-weight: 700; min-width: 72px; color: var(--accent); }
+  .muted { color: var(--muted); font-size: 14px; }
+  .bar { height: 6px; background: var(--accent-soft); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+  details { margin-top: 10px; font-size: 14px; }
+  .ok { color: var(--good); } .no { color: var(--bad); }
+  .error { color: var(--bad); margin-top: 8px; }
+  @media (max-width: 560px) { .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>CampusMatch</h1>
+  <p class="lede">Answer a few questions, say which answers you'd accept from a roommate and how much
+    each one matters, and see who on campus fits you best.</p>
+
+  <form id="form">
+    <div class="card row">
+      <div><label for="name">Name</label><input id="name" required maxlength="80" placeholder="Your name"></div>
+      <div><label for="major">Major</label><input id="major" maxlength="80" placeholder="e.g. Biology"></div>
+      <div><label for="year">Year</label>
+        <select id="year"><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
+    </div>
+    <div id="questions"></div>
+    <button id="submit" type="submit">Find my matches</button>
+    <div id="error" class="error" role="alert"></div>
+  </form>
+
+  <section id="results" hidden>
+    <h2>Your top matches</h2>
+    <div id="matches"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const IMPORTANCE = [["irrelevant", "Irrelevant"], ["a_little", "A little"], ["somewhat", "Somewhat"],
+                    ["very", "Very"], ["mandatory", "Mandatory"]];
+let QUESTIONS = [];
+let myId = null;
+
+function el(tag, attrs = {}, ...children) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v; else if (k in e) e[k] = v; else e.setAttribute(k, v);
+  }
+  for (const c of children) e.append(c);
+  return e;
+}
+
+async function loadQuestions() {
+  QUESTIONS = await (await fetch("questions")).json();
+  const root = $("questions");
+  for (const q of QUESTIONS) {
+    const opts = el("div", { class: "opts" },
+      el("span", { class: "hdr" }, "Me"), el("span", { class: "hdr" }, "Answer"),
+      el("span", { class: "hdr" }, "OK for them"));
+    q.options.forEach((text, i) => {
+      opts.append(
+        el("input", { type: "radio", name: `c-${q.id}`, value: i, "aria-label": `My answer: ${text}` }),
+        el("span", {}, text),
+        el("input", { type: "checkbox", name: `a-${q.id}`, value: i, "aria-label": `Accept: ${text}` }));
+    });
+    const imp = el("select", { name: `i-${q.id}` });
+    IMPORTANCE.forEach(([v, t]) => imp.append(el("option", { value: v, selected: v === "somewhat" }, t)));
+    root.append(el("div", { class: "card" }, el("div", { class: "q-text" }, q.text), opts,
+      el("div", { class: "imp" }, el("span", { class: "muted" }, "How much it matters:"), imp)));
+  }
+}
+
+function collectAnswers() {
+  const form = $("form");
+  const answers = [];
+  for (const q of QUESTIONS) {
+    const chosen = form.querySelector(`input[name="c-${q.id}"]:checked`);
+    if (!chosen) continue;
+    let acceptable = [...form.querySelectorAll(`input[name="a-${q.id}"]:checked`)].map((x) => +x.value);
+    if (!acceptable.length) acceptable = [+chosen.value];
+    answers.push({ question_id: q.id, choice: +chosen.value, acceptable,
+                   importance: form.querySelector(`select[name="i-${q.id}"]`).value });
+  }
+  return answers;
+}
+
+async function showBreakdown(otherId, target) {
+  if (target.dataset.loaded) return;
+  const data = await (await fetch(`compare/${myId}/${otherId}`)).json();
+  target.dataset.loaded = "1";
+  for (const r of data.breakdown) {
+    target.append(el("div", {},
+      el("span", { class: r.a_satisfied ? "ok" : "no" }, r.a_satisfied ? "✓ " : "✗ "),
+      `${r.question} You: ${r.a_answer} · Them: ${r.b_answer}`));
+  }
+}
+
+function renderMatches(matches) {
+  const root = $("matches");
+  root.replaceChildren();
+  if (!matches.length) root.append(el("p", { class: "muted" }, "Answer at least one question to see matches."));
+  for (const m of matches) {
+    const body = el("div", {});
+    const details = el("details", {}, el("summary", {}, "Why?"), body);
+    details.addEventListener("toggle", () => details.open && showBreakdown(m.id, body));
+    const bar = el("div", { class: "bar" }, el("span", { style: `width:${m.match}%` }));
+    root.append(el("div", { class: "card" },
+      el("div", { class: "match" }, el("div", { class: "pct" }, `${m.match}%`),
+        el("div", { style: "flex:1" }, el("strong", {}, m.name),
+          el("div", { class: "muted" }, `${m.major || "Undeclared"} · Year ${m.year} · ` +
+            `you→them ${m.you_like_them}%, them→you ${m.they_like_you}% · ${m.shared_questions} shared`),
+          bar)),
+      details));
+  }
+  $("results").hidden = false;
+  $("results").scrollIntoView({ behavior: "smooth" });
+}
+
+$("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("error").textContent = "";
+  $("submit").disabled = true;
+  try {
+    const res = await fetch("profiles", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: $("name").value.trim(), major: $("major").value.trim(),
+                             year: +$("year").value, answers: collectAnswers() }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    myId = (await res.json()).id;
+    renderMatches(await (await fetch(`profiles/${myId}/matches?k=10`)).json());
+  } catch (err) {
+    $("error").textContent = `Something went wrong: ${typeof err.message === "string" ? err.message : "invalid input"}`;
+  } finally {
+    $("submit").disabled = false;
+  }
+});
+
+loadQuestions();
+</script>
+</body>
+</html>
