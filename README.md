@@ -14,7 +14,7 @@ then does two things:
    to a greedy pairing that is provably stable on the mutual match score.
 
 It's a Python library, a REST API (FastAPI) that stores profiles in memory or in SQLite, a CLI,
-and a small web UI with no dependencies. An optional NumPy path scores a whole population 30–40x
+and a small web UI with no dependencies. An optional NumPy path scores a whole population about 27–40x
 faster than the pure-Python scorer and gives the same numbers. It has 65 tests, including a
 brute-force check of the pairing algorithm against every possible pairing on random inputs, and
 a check that the NumPy path matches the scalar scorer on every pair.
@@ -131,7 +131,7 @@ over three runs:
 
 | Students | Pure Python (`top_matches` per student) | NumPy (`fast.py`) | Speedup |
 |---:|---:|---:|---:|
-| 500 | 1.0–1.2 s (≈230k pair scores/s) | 0.03 s (≈7.5M pair scores/s) | 30–36x |
+| 500 | 1.0–1.2 s (≈230k pair scores/s) | 0.03–0.04 s (≈6.6–7.5M pair scores/s) | 27–36x |
 | 2000 | 17.5–18.5 s (≈220k pair scores/s) | 0.46–0.52 s (≈8.5M pair scores/s) | 34–40x |
 
 Both columns do the same work: score every ordered pair, then take each student's top 10.
